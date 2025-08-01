@@ -19,7 +19,10 @@ if (isset($_GET['logout'])) {
     exit;
 }
 
-// Fetch questions with vote counts
+// Handle search and tag filtering
+$search = isset($_GET['search']) ? trim($_GET['search']) : '';
+$tag = isset($_GET['tag']) ? trim($_GET['tag']) : '';
+
 $sql = "
     SELECT q.id, q.title, q.description, q.created_at, u.username,
       GROUP_CONCAT(t.name ORDER BY t.name SEPARATOR ',') AS tags,
@@ -31,12 +34,36 @@ $sql = "
     LEFT JOIN tags t ON qt.tag_id = t.id
     LEFT JOIN answers a ON a.question_id = q.id
     LEFT JOIN votes v ON v.answer_id = a.id
+    WHERE 1
+";
+
+$params = [];
+if ($search !== '') {
+    $sql .= " AND (q.title LIKE ? OR q.description LIKE ?)";
+    $searchParam = "%$search%";
+    $params[] = $searchParam;
+    $params[] = $searchParam;
+}
+if ($tag !== '') {
+    $sql .= " AND FIND_IN_SET(?, GROUP_CONCAT(t.name))";
+    $params[] = $tag;
+}
+
+$sql .= "
     GROUP BY q.id
     ORDER BY q.created_at DESC
     LIMIT 20
 ";
-$result = $mysqli->query($sql);
 
+if (count($params)) {
+    $stmt = $mysqli->prepare($sql);
+    $types = str_repeat('s', count($params));
+    $stmt->bind_param($types, ...$params);
+    $stmt->execute();
+    $result = $stmt->get_result();
+} else {
+    $result = $mysqli->query($sql);
+}
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -148,24 +175,47 @@ $result = $mysqli->query($sql);
 <nav class="navbar navbar-expand-lg navbar-dark px-4">
   <a class="navbar-brand" href="#">StackIt</a>
   <div class="collapse navbar-collapse">
-    <form class="d-flex ms-3 me-auto">
-      <input class="form-control me-2" id="searchInput" type="search" placeholder="Search..." />
-      <button class="btn btn-outline-light" type="button" onclick="alert('Search coming soon!')">Search</button>
+    <form class="d-flex ms-3 me-auto" method="GET" action="index.php">
+      <input class="form-control me-2" id="searchInput" name="search" type="search" placeholder="Search..." value="<?= htmlspecialchars($search) ?>" />
+      <button class="btn btn-outline-light" type="submit">Search</button>
     </form>
     <div class="d-flex align-items-center gap-3">
       <div class="dropdown">
-        <span class="fs-4 text-white dropdown-toggle" role="button" id="notifBell" data-bs-toggle="dropdown" aria-expanded="false">🔔</span>
-        <ul class="dropdown-menu dropdown-menu-end bg-dark text-light" aria-labelledby="notifBell">
-          <li><a class="dropdown-item text-white" href="#">💬 Someone answered your question</a></li>
-          <li><a class="dropdown-item text-white" href="#">👍 Your answer got upvoted</a></li>
+        <span class="fs-4 text-white position-relative dropdown-toggle" role="button" id="notifBellIcon" data-bs-toggle="dropdown" aria-expanded="false">
+          🔔<span id="notifCount" style="position:absolute;top:0;right:0;background:#ff4757;color:#fff;border-radius:50%;font-size:0.7em;padding:2px 6px;display:none;"></span>
+        </span>
+        <ul class="dropdown-menu dropdown-menu-end bg-dark text-light" aria-labelledby="notifBellIcon" id="notifDropdown">
+          <li><span class="dropdown-item text-muted">Loading...</span></li>
         </ul>
+        <script>
+        function loadNotifications() {
+          fetch('notifications.php')
+            .then(res => res.json())
+            .then(data => {
+              const dropdown = document.getElementById('notifDropdown');
+              dropdown.innerHTML = '';
+              if (data.length === 0) {
+                dropdown.innerHTML = '<li><span class="dropdown-item text-muted">No notifications</span></li>';
+                document.getElementById('notifCount').style.display = 'none';
+              } else {
+                data.forEach(n => {
+                  dropdown.innerHTML += `<li><span class="dropdown-item${n.is_read ? '' : ' fw-bold'}">${n.message}</span></li>`;
+                });
+                document.getElementById('notifCount').textContent = data.filter(n=>!n.is_read).length;
+                document.getElementById('notifCount').style.display = '';
+              }
+            });
+        }
+        document.getElementById('notifBellIcon').addEventListener('click', function() {
+          fetch('notifications.php?mark_read=1').then(()=>loadNotifications());
+        });
+        window.onload = loadNotifications;
+        </script>
       </div>
       <span id="themeToggle" class="fs-4 text-white" role="button" title="Toggle Theme">🌙</span>
-
       <form method="GET" action="" class="d-inline">
         <button name="logout" class="btn btn-outline-danger">Logout</button>
       </form>
-
       <a href="ask.php" class="btn btn-success">Ask Question</a>
     </div>
   </div>
@@ -174,26 +224,25 @@ $result = $mysqli->query($sql);
 <div class="container my-4 shadow-lg">
   <div class="d-flex justify-content-between align-items-center mb-3">
     <div class="btn-group" role="group">
-      <button class="btn btn-outline-secondary" onclick="alert('Newest filter coming soon!')">Newest</button>
-      <button class="btn btn-outline-secondary" onclick="alert('Unanswered filter coming soon!')">Unanswered</button>
+      <button class="btn btn-outline-secondary" onclick="window.location.href='index.php'">Newest</button>
+      <button class="btn btn-outline-secondary" onclick="window.location.href='index.php?unanswered=1'">Unanswered</button>
     </div>
     <small class="text-muted">Showing latest questions</small>
   </div>
 
   <div id="questionList" class="question-list">
-
     <?php if ($result->num_rows === 0): ?>
       <p class="text-center text-muted">No questions found.</p>
     <?php else: ?>
       <?php while ($row = $result->fetch_assoc()): ?>
         <div class="card question p-3">
-          <a href="question.php?id=<?= $row['id'] ?>" class="question-title"><?= htmlspecialchars($row['title']) ?></a>
+          <a href="answer.php?id=<?= $row['id'] ?>" class="question-title"><?= htmlspecialchars($row['title']) ?></a>
           <?= nl2br(htmlspecialchars(strip_tags($row['description']))) ?>
 
           <?php if ($row['tags']): ?>
             <div class="mb-2">
               <?php foreach (explode(',', $row['tags']) as $tag): ?>
-                <span class="badge tag"><?= htmlspecialchars($tag) ?></span>
+                <a href="index.php?tag=<?= urlencode($tag) ?>" class="badge tag"><?= htmlspecialchars($tag) ?></a>
               <?php endforeach; ?>
             </div>
           <?php endif; ?>
@@ -210,7 +259,6 @@ $result = $mysqli->query($sql);
         </div>
       <?php endwhile; ?>
     <?php endif; ?>
-
   </div>
 
   <nav class="mt-4">
@@ -239,9 +287,56 @@ function vote(questionId, type) {
       alert('Error: ' + data.message);
     }
   })
-  .catch(err => alert('Request error: ' + err));
+  .catch(err => {
+    console.error('Vote error:', err);
+    alert('An error occurred whilea voting.');
+  });
 }
+document.getElementById('themeToggle').addEventListener('click', function() {
+  document.body.classList.toggle('night-mode');
+  this.textContent = document.body.classList.contains('night-mode') ? '☀️' : '🌙';
+});
 </script>
-
+<canvas id="snowCanvas"></canvas>
+<script>
+const canvas = document.getElementById('snowCanvas');
+const ctx = canvas.getContext('2d');
+canvas.width = window.innerWidth;
+canvas.height = window.innerHeight; 
+const snowflakes = [];
+function createSnowflake() {
+  const size = Math.random() * 3 + 2;
+  const x = Math.random() * canvas.width;
+  const y = Math.random() * canvas.height;
+  const speed = Math.random() * 1 + 0.5;
+  snowflakes.push({ x, y, size, speed });
+}
+function drawSnowflakes() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
+  ctx.beginPath();
+  snowflakes.forEach(s => {
+    ctx.moveTo(s.x, s.y);
+    ctx.arc(s.x, s.y, s.size, 0, Math.PI * 2);
+    s.y += s.speed;
+    if (s.y > canvas.height) {
+      s.y = 0;
+      s.x = Math.random() * canvas.width;
+    }
+  });
+  ctx.fill();
+}
+setInterval(() => {
+  if (snowflakes.length < 100) createSnowflake();
+  drawSnowflakes();
+}, 50);
+window.addEventListener('resize', () => {
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+});
+</script>
 </body>
 </html>
+<?php
+$mysqli->close();
+?>
